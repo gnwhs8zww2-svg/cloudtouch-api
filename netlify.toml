@@ -1,15 +1,5 @@
 [build]
-  publish = "public"
   functions = "netlify/functions"
-
-[functions]
-  directory = "netlify/functions"
-
-# Disable secrets scanning for initial deployment
-# Re-enable after first successful build and environment variables are set
-[build.environment]
-  NODE_VERSION = "18"
-  SECRETS_SCAN_ENABLED = "false"
 
 [[redirects]]
   from = "/api/*"

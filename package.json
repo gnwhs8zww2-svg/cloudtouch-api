@@ -1,15 +1,6 @@
 {
-  "name": "cloudtouch-api-netlify",
+  "name": "cloudtouch-api",
   "version": "1.0.0",
-  "description": "CloudTouch API for Netlify Functions",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "dependencies": {
-    "@upstash/redis": "^1.22.0"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC"
+  "description": "Netlify Functions for CloudTouch",
+  "dependencies": {}
 }

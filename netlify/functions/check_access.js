@@ -1,123 +1,165 @@
-const { Redis } = require('@upstash/redis');
+const fs = require('fs');
+const path = require('path');
 
-let redis = null;
+const DATA_DIR = path.resolve(__dirname, '../../../data');
+const DATA_FILE = path.resolve(DATA_DIR, 'cloudtouch_access.json');
 
-// Initialize Redis
-function initRedis() {
-  if (!redis && process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
-    redis = new Redis({
-      url: process.env.UPSTASH_REDIS_REST_URL,
-      token: process.env.UPSTASH_REDIS_REST_TOKEN,
-    });
-  }
-  return redis;
-}
+exports.handler = async function(event, context) {
+  // Allow CORS
+  const headers = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Methods": "POST, OPTIONS"
+  };
 
-// Verify HMAC signature
-function verifySignature(data, signature) {
-  const crypto = require('crypto');
-  const secret = process.env.CLOUDTOUCH_API_SECRET || 'MySecretKey123!@#';
-  const expected = crypto.createHmac('sha256', secret).update(data).digest('hex');
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
-}
-
-// Load CloudTouch access data
-async function loadCloudtouchAccess() {
-  const redis = initRedis();
-  if (redis) {
-    try {
-      const data = await redis.get('cloudtouch_access');
-      return data ? JSON.parse(data) : {};
-    } catch (e) {
-      return {};
-    }
-  }
-  return {};
-}
-
-exports.handler = async (event, context) => {
-  // Handle CORS
-  if (event.httpMethod === 'OPTIONS') {
-    return {
-      statusCode: 200,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type'
-      }
-    };
+  if (event.httpMethod === "OPTIONS") {
+    return { statusCode: 200, headers, body: "OK" };
   }
 
-  if (event.httpMethod !== 'POST') {
-    return {
-      statusCode: 405,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ error: 'Method not allowed' })
-    };
+  if (event.httpMethod !== "POST") {
+    return { statusCode: 405, headers, body: "Method Not Allowed" };
   }
 
   try {
     let data;
-    if (event.body) {
-      if (typeof event.body === 'string') {
-        data = JSON.parse(event.body);
-      } else {
-        data = event.body;
+    try {
+      if (!event.body) {
+        throw new Error("Empty body");
       }
-    } else {
-      data = {};
+      data = JSON.parse(event.body);
+    } catch (e) {
+      return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid JSON body" }) };
     }
 
-    const discordId = String(data.discord_id || '');
-    const signature = data.signature || '';
+    const userId = data.user_id || data.discord_id;
+    const reqIp = (data.ip || "").trim();
+    const action = (data.action || "").trim().toLowerCase();
+    const listFlag = !!data.list;
 
-    // Verify signature
-    if (!verifySignature(discordId, signature)) {
-      return {
-        statusCode: 403,
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ error: 'Invalid signature' })
+    if (action === "scan" || action === "scan_check") {
+      if (!userId) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "Missing user_id" }) };
+      }
+      let foundFiles = [];
+      try {
+        const files = fs.readdirSync(DATA_DIR);
+        for (const f of files) {
+          if (!f.toLowerCase().endsWith('.json')) continue;
+          const fp = path.resolve(DATA_DIR, f);
+          try {
+            const content = fs.readFileSync(fp, 'utf8');
+            let matched = false;
+            try {
+              const j = JSON.parse(content);
+              if (typeof j === 'object' && j !== null) {
+                if (Object.prototype.hasOwnProperty.call(j, userId)) {
+                  matched = true;
+                } else {
+                  const values = JSON.stringify(j);
+                  if (values.includes(userId)) matched = true;
+                }
+              }
+            } catch {
+              if (content.includes(userId)) matched = true;
+            }
+            if (matched) foundFiles.push(f);
+          } catch {}
+        }
+      } catch {}
+      const foundCount = foundFiles.length > 0 ? 1 : 0;
+      const result = {
+        status: "ok",
+        found_count: foundCount,
+        users: foundCount ? [userId] : [],
+        files: foundFiles
       };
+      return { statusCode: 200, headers, body: JSON.stringify(result) };
     }
 
-    const accessData = await loadCloudtouchAccess();
-    const hasAccess = discordId in accessData;
-
-    let response;
-    if (hasAccess) {
-      response = {
-        access: true,
-        granted_at: accessData[discordId].granted_at || 'Unknown'
-      };
-    } else {
-      response = {
-        access: false,
-        message: 'Access denied. Purchase access using /cloudtouch-payment in Discord.'
-      };
+    // List all access entries (optional type filter)
+    if (action === "list" || listFlag) {
+      let db = {};
+      if (fs.existsSync(DATA_FILE)) {
+        try {
+          db = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+        } catch (e) {
+          db = {};
+        }
+      }
+      const typeFilter = (data.type || "").trim();
+      if (typeFilter) {
+        const filtered = {};
+        Object.keys(db).forEach(uid => {
+          if ((db[uid].type || "").toLowerCase() === typeFilter.toLowerCase()) {
+            filtered[uid] = db[uid];
+          }
+        });
+        return { statusCode: 200, headers, body: JSON.stringify({ users: filtered }) };
+      }
+      return { statusCode: 200, headers, body: JSON.stringify({ users: db }) };
     }
+
+    if (!userId) {
+      return { statusCode: 400, headers, body: JSON.stringify({ error: "Missing user_id" }) };
+    }
+
+    // Load DB
+    let db = {};
+    if (fs.existsSync(DATA_FILE)) {
+      try {
+        db = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+      } catch (e) {
+        console.error("DB Read Error", e);
+      }
+    }
+
+    // Check Access
+    let hasAccess = false;
+    let accessDetails = { plan: "Free", expiry: "None" };
+    
+    // Check local DB
+    if (db[userId]) {
+      // Enforce IP binding if present
+      const allowedIp = (db[userId].allowed_ip || "").trim();
+      if (allowedIp && reqIp && allowedIp !== reqIp) {
+        hasAccess = false;
+      } else {
+        hasAccess = true;
+        accessDetails = {
+          plan: (db[userId].type || "Premium"),
+          expiry: "Lifetime"
+        };
+        // Bind first IP if not set and request provided
+        if (!allowedIp && reqIp) {
+          db[userId].allowed_ip = reqIp;
+          try {
+            const dir = path.dirname(DATA_FILE);
+            if (!fs.existsSync(dir)) {
+              fs.mkdirSync(dir, { recursive: true });
+            }
+            fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2), 'utf8');
+          } catch (e) {}
+        }
+      }
+    }
+    
+    // No external fallback: only file-based data determines access
 
     return {
       statusCode: 200,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(response)
+      headers,
+      body: JSON.stringify({
+        user_id: userId,
+        has_access: hasAccess,
+        access_details: accessDetails
+      })
     };
   } catch (error) {
-    return {
-      statusCode: 500,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ error: 'Internal error' })
+    console.error("Internal Error:", error);
+    return { 
+        statusCode: 500, 
+        headers, 
+        body: JSON.stringify({ error: "Internal Server Error", details: error.message }) 
     };
   }
 };

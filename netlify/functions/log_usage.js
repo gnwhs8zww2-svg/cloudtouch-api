@@ -1,221 +1,96 @@
-const { Redis } = require('@upstash/redis');
 const https = require('https');
 
-let redis = null;
+exports.handler = async function(event, context) {
+  // Allow CORS
+  const headers = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Methods": "POST, OPTIONS"
+  };
 
-// Initialize Redis
-function initRedis() {
-  if (!redis && process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
-    redis = new Redis({
-      url: process.env.UPSTASH_REDIS_REST_URL,
-      token: process.env.UPSTASH_REDIS_REST_TOKEN,
-    });
-  }
-  return redis;
-}
-
-// Verify HMAC signature
-function verifySignature(data, signature) {
-  const crypto = require('crypto');
-  const secret = process.env.CLOUDTOUCH_API_SECRET || 'MySecretKey123!@#';
-  const expected = crypto.createHmac('sha256', secret).update(data).digest('hex');
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
-}
-
-// Load user data
-async function loadUserData() {
-  const redis = initRedis();
-  if (redis) {
-    try {
-      const data = await redis.get('user_data');
-      return data ? JSON.parse(data) : {};
-    } catch (e) {
-      return {};
-    }
-  }
-  return {};
-}
-
-// Save user data
-async function saveUserData(userData) {
-  const redis = initRedis();
-  if (redis) {
-    try {
-      await redis.set('user_data', JSON.stringify(userData));
-      return true;
-    } catch (e) {
-      return false;
-    }
-  }
-  return false;
-}
-
-exports.handler = async (event, context) => {
-  // Handle CORS
-  if (event.httpMethod === 'OPTIONS') {
-    return {
-      statusCode: 200,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type'
-      }
-    };
+  if (event.httpMethod === "OPTIONS") {
+    return { statusCode: 200, headers, body: "OK" };
   }
 
-  if (event.httpMethod !== 'POST') {
-    return {
-      statusCode: 405,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ error: 'Method not allowed' })
-    };
+  if (event.httpMethod !== "POST") {
+    return { statusCode: 405, headers, body: "Method Not Allowed" };
   }
 
   try {
     let data;
-    if (event.body) {
-      if (typeof event.body === 'string') {
-        data = JSON.parse(event.body);
-      } else {
-        data = event.body;
-      }
-    } else {
-      data = {};
-    }
-
-    const discordId = String(data.discord_id || '');
-    const signature = data.signature || '';
-    const userInfo = data.user_info || {};
-
-    // Verify signature
-    if (!verifySignature(discordId, signature)) {
-      return {
-        statusCode: 403,
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ error: 'Invalid signature' })
-      };
-    }
-
-    // Update user data
-    const userData = await loadUserData();
-    const userIdStr = String(discordId);
-
-    if (!(userIdStr in userData)) {
-      userData[userIdStr] = {
-        user_id: userIdStr,
-        first_used: new Date().toISOString(),
-        usage_count: 0,
-        last_used: null,
-        hwid: [],
-        ip_addresses: [],
-        isp_info: [],
-        system_info: []
-      };
-    }
-
-    userData[userIdStr].usage_count = (userData[userIdStr].usage_count || 0) + 1;
-    userData[userIdStr].last_used = new Date().toISOString();
-
-    // Track HWID
-    if (userInfo.hwid && !userData[userIdStr].hwid.includes(userInfo.hwid)) {
-      userData[userIdStr].hwid.push(userInfo.hwid);
-    }
-
-    // Track IP
-    if (userInfo.ip && !userData[userIdStr].ip_addresses.includes(userInfo.ip)) {
-      userData[userIdStr].ip_addresses.push(userInfo.ip);
-    }
-
-    // Track ISP info
-    const ispData = {};
-    ['isp', 'country', 'city', 'org', 'timezone'].forEach(key => {
-      if (userInfo[key]) ispData[key] = userInfo[key];
-    });
-    if (Object.keys(ispData).length > 0 && !userData[userIdStr].isp_info.some(item =>
-      JSON.stringify(item) === JSON.stringify(ispData)
-    )) {
-      userData[userIdStr].isp_info.push(ispData);
-    }
-
-    // Track system info
-    const sysData = {};
-    ['hostname', 'platform', 'processor', 'system'].forEach(key => {
-      if (userInfo[key]) sysData[key] = userInfo[key];
-    });
-    if (Object.keys(sysData).length > 0 && !userData[userIdStr].system_info.some(item =>
-      JSON.stringify(item) === JSON.stringify(sysData)
-    )) {
-      userData[userIdStr].system_info.push(sysData);
-    }
-
-    await saveUserData(userData);
-
-    // Log to webhook
     try {
-      const timestamp = new Date().toISOString();
-      const embedData = {
-        title: '📊 CloudTouch: Tool Launched',
-        description: `**User ID:** ${discordId}\n**Time:** ${timestamp}`,
-        color: 0x00ff00,
-        fields: [
-          { name: 'HWID', value: userInfo.hwid || 'Unknown', inline: true },
-          { name: 'IP', value: userInfo.ip || 'Unknown', inline: true },
-          { name: 'ISP', value: userInfo.isp || 'Unknown', inline: true },
-          { name: 'Country', value: userInfo.country || 'Unknown', inline: true },
-          { name: 'City', value: userInfo.city || 'Unknown', inline: true },
-          { name: 'Hostname', value: userInfo.hostname || 'Unknown', inline: true },
-          { name: 'Platform', value: userInfo.platform || 'Unknown', inline: true },
-          { name: 'Usage Count', value: String(userData[userIdStr].usage_count), inline: true }
-        ]
+        if (!event.body) {
+             return { statusCode: 200, headers, body: JSON.stringify({ status: "skipped", reason: "empty body" }) };
+        }
+        data = JSON.parse(event.body);
+    } catch (e) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid JSON" }) };
+    }
+
+    const userId = data.user_id || data.discord_id;
+    const action = data.action || "System Log";
+    let details = data.details || data.user_info || "No details provided";
+
+    if (typeof details === 'object') {
+        try {
+            details = JSON.stringify(details, null, 2);
+        } catch (e) {
+            details = "[Complex Object]";
+        }
+    }
+
+    // Validate input
+    if (!userId) {
+      return { statusCode: 400, headers, body: JSON.stringify({ error: "Missing user_id" }) };
+    }
+
+    // DISCORD WEBHOOK URL (Set this in your Netlify Environment Variables)
+    const webhookUrl = process.env.MAIN_WEBHOOK;
+
+    if (webhookUrl) {
+      // Truncate details if too long for Discord (limit is usually 2000 chars for content, but we embed or split)
+      // Here we just truncate to be safe
+      const safeDetails = details.length > 1500 ? details.substring(0, 1500) + "..." : details;
+
+      const payload = JSON.stringify({
+        content: `📝 **Log Entry**\n**User:** \`${userId}\`\n**Action:** \`${action}\`\n**Details:**\n\`\`\`json\n${safeDetails}\n\`\`\`\n**Time:** <t:${Math.floor(Date.now() / 1000)}:F>`
+      });
+
+      const url = new URL(webhookUrl);
+      const options = {
+        hostname: url.hostname,
+        path: url.pathname + url.search,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload)
+        }
       };
 
-      const payload = { embeds: [embedData] };
-      const webhookUrl = process.env.MAIN_WEBHOOK;
-
-      if (webhookUrl) {
-        const postData = JSON.stringify(payload);
-        const url = new URL(webhookUrl);
-
-        const options = {
-          hostname: url.hostname,
-          path: url.pathname,
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(postData)
-          }
-        };
-
-        const req = https.request(options);
-        req.write(postData);
-        req.end();
+      try {
+          await new Promise((resolve, reject) => {
+            const req = https.request(options, (res) => {
+              resolve(res);
+            });
+            req.on('error', (e) => {
+              console.error("Webhook Error:", e);
+              resolve(); 
+            });
+            req.write(payload);
+            req.end();
+          });
+      } catch (e) {
+          console.error("Webhook Promise Error:", e);
       }
-    } catch (e) {
-      // Ignore webhook errors
     }
 
     return {
       statusCode: 200,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ status: 'logged' })
+      headers,
+      body: JSON.stringify({ status: "logged", service: "Netlify" })
     };
   } catch (error) {
-    return {
-      statusCode: 500,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ error: 'Internal error' })
-    };
+    console.error("Log Usage Error:", error);
+    return { statusCode: 200, headers, body: JSON.stringify({ status: "error", message: error.message }) };
   }
 };
